@@ -35,7 +35,9 @@ type Instance struct {
 	MTime          Duration `toml:"mtime"`
 	fileFilters    []fileFilterFunc
 	globPaths      []globpath.GlobPath
+	tags           map[string]string
 	Fs             fileSystem
+	metricPrefix   string
 }
 
 func init() {
@@ -91,6 +93,24 @@ func (ins *Instance) Init() error {
 	}
 
 	return nil
+}
+
+func (ins *Instance) SetTag(m map[string]string) {
+	if ins.tags == nil {
+		ins.tags = m
+	}
+}
+
+func (ins *Instance) SetPrefix(prefix string) {
+	ins.metricPrefix = prefix
+}
+
+func (ins *Instance) GetPrefix() string {
+	if ins.metricPrefix == "" {
+		return inputName
+	}
+	prefix := fmt.Sprintf("%s_%s", ins.metricPrefix, inputName)
+	return prefix
 }
 
 func (ins *Instance) initGlobPaths() (string, error) {
@@ -273,16 +293,22 @@ func (ins *Instance) count(slist *types.SampleList, basedir string, glob globpat
 			tags := map[string]string{
 				"directory": path,
 			}
+			if len(ins.tags) > 0 {
+				for tag, val := range ins.tags {
+					tags[tag] = val
+				}
+			}
 
 			gauge := map[string]interface{}{
 				"count":      childCount[path],
 				"size_bytes": childSize[path],
 			}
 
-			gauge["oldest_file_timestamp"] = oldestFileTimestamp[path]
-			gauge["newest_file_timestamp"] = newestFileTimestamp[path]
+			// gauge["oldest_file_timestamp"] = oldestFileTimestamp[path]
+			// gauge["newest_file_timestamp"] = newestFileTimestamp[path]
 
-			slist.PushSamples(inputName, gauge, tags)
+			prefix := ins.GetPrefix()
+			slist.PushSamples(prefix, gauge, tags)
 		}
 		parent := filepath.Dir(path)
 		if *ins.Recursive {
