@@ -85,9 +85,15 @@ func (pt *TZServiceInput) initLogger() {
 	logger := logrus.New()
 	logger.Out = writer
 
-	level, err := logrus.ParseLevel(pt.Log.Level)
-	if err != nil {
-		fmt.Println(err)
+	var level logrus.Level
+	if pt.Log.Level != "" {
+		var err error
+		level, err = logrus.ParseLevel(pt.Log.Level)
+		if err != nil {
+			fmt.Println(err)
+			level = logrus.InfoLevel
+		}
+	} else {
 		level = logrus.InfoLevel
 	}
 	logger.SetLevel(level)
