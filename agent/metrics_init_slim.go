@@ -17,6 +17,7 @@ import (
 	_ "flashcat.cloud/categraf/inputs/netstat_filter"
 	_ "flashcat.cloud/categraf/inputs/ntp"
 	_ "flashcat.cloud/categraf/inputs/processes"
+	_ "flashcat.cloud/categraf/inputs/procscan"
 	_ "flashcat.cloud/categraf/inputs/procstat"
 	_ "flashcat.cloud/categraf/inputs/self_metrics"
 	_ "flashcat.cloud/categraf/inputs/sockstat"

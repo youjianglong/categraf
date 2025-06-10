@@ -66,6 +66,7 @@ import (
 	_ "flashcat.cloud/categraf/inputs/ping"
 	_ "flashcat.cloud/categraf/inputs/postgresql"
 	_ "flashcat.cloud/categraf/inputs/processes"
+	_ "flashcat.cloud/categraf/inputs/procscan"
 	_ "flashcat.cloud/categraf/inputs/procstat"
 	_ "flashcat.cloud/categraf/inputs/prometheus"
 	_ "flashcat.cloud/categraf/inputs/rabbitmq"

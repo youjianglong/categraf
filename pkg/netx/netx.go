@@ -2,7 +2,10 @@ package netx
 
 import (
 	"fmt"
+	"log"
 	"net"
+	"strings"
+	"time"
 )
 
 func LocalAddressByInterfaceName(interfaceName string) (net.Addr, error) {
@@ -24,4 +27,15 @@ func LocalAddressByInterfaceName(interfaceName string) (net.Addr, error) {
 	}
 
 	return nil, fmt.Errorf("cannot create local address for interface %q", interfaceName)
+}
+
+func LocalOutboundIP() string {
+	server := "119.29.29.29:53"
+	conn, err := net.DialTimeout("udp", server, time.Second)
+	if err != nil {
+		log.Println(err)
+		return ""
+	}
+	defer conn.Close()
+	return strings.SplitN(conn.LocalAddr().String(), ":", 2)[0]
 }

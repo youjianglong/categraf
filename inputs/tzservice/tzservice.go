@@ -117,6 +117,8 @@ func (pt *TZServiceInput) initGameServiceInfoCache() {
 		provider = NewFileGameServiceInfoProvider(pt.ServiceConfig.FileProvider)
 	} else if pt.ServiceConfig.RedisProvider != nil {
 		provider = NewRedisGameServiceInfoProvider(pt.ServiceConfig.RedisProvider)
+	} else if pt.ServiceConfig.CmdbProvider != nil {
+		provider = NewCmdbGameServiceInfoProvider(pt.ServiceConfig.CmdbProvider)
 	} else {
 		panic("游戏服信息接口配置不存在")
 	}
@@ -173,7 +175,7 @@ func (pt *TZServiceInput) GetInstances() []inputs.Instance {
 	return ins
 }
 
-func (pt *TZServiceInput) findProcesses(baseDir string, services []*GameServiceInfo, isService func(string) bool) (map[string]*process.Process, error) {
+func (pt *TZServiceInput) findGameServerProcesses(baseDir string, services []*GameServiceInfo, isService func(string) bool) (map[string]*process.Process, error) {
 	processes, err := process.Processes()
 	if err != nil {
 		return nil, err
@@ -227,6 +229,46 @@ func (pt *TZServiceInput) findProcesses(baseDir string, services []*GameServiceI
 	return pm, nil
 }
 
+func (pt *TZServiceInput) findOtherProcesses(services []*GameServiceInfo, isService func(string) bool) (map[string][]*process.Process, error) {
+	ps, err := process.Processes()
+	if err != nil {
+		return nil, err
+	}
+	find := func(p *process.Process) *GameServiceInfo {
+		exe, _ := p.Exe()
+		cmd, _ := p.Cmdline()
+		cwd, _ := p.Cwd()
+		for _, info := range services {
+			_exe, ok := info.Extra["exe"].(string)
+			if ok && exe != _exe {
+				continue
+			}
+			_cwd, ok := info.Extra["cwd"].(string)
+			if ok && _cwd != cwd {
+				continue
+			}
+			if info.CheckCmd != "" && !strings.Contains(cmd, info.CheckCmd) {
+				continue
+			}
+			return info
+		}
+		return nil
+	}
+	pm := map[string][]*process.Process{}
+	for _, p := range ps {
+		status, _ := p.Status()
+		if status == "" || status == "Z" {
+			continue
+		}
+		info := find(p)
+		if info != nil {
+			pm[info.ServiceId] = append(pm[info.ServiceId], p)
+		}
+	}
+
+	return pm, nil
+}
+
 func (pt *TZServiceInput) isService(cmd string) bool {
 	if pt.serviceMatcher == nil {
 		return true
@@ -236,16 +278,33 @@ func (pt *TZServiceInput) isService(cmd string) bool {
 
 func (pt *TZServiceInput) Gather(sl *types.SampleList) {
 	infos := pt.gameServiceInfoCache.GetGameServiceInfo()
-	ps, err := pt.findProcesses(pt.ServiceConfig.BaseDir, infos, pt.isService)
-	if err != nil {
-		pt.logger.WithError(err).Error("查找进程失败")
-		return
-	}
-	pt.updateProcesses(ps)
 	wait := &sync.WaitGroup{}
-	wait.Add(len(infos))
-	for _, info := range infos {
-		go pt.gather(wait, sl, info, pt.procs[info.ServiceId])
+	if pt.ServiceConfig.Mode == 1 {
+		pss, err := pt.findOtherProcesses(infos, pt.isService)
+		if err != nil {
+			pt.logger.WithError(err).Error("查找进程失败")
+			return
+		}
+		for _, info := range infos {
+			ps := pss[info.ServiceId]
+			size := len(ps)
+			wait.Add(size)
+			sl.PushSample(metricPrefix, "num_proc", float64(size), info.MetricTags())
+			for _, p := range ps {
+				go pt.gather(wait, sl, info, p)
+			}
+		}
+	} else {
+		ps, err := pt.findGameServerProcesses(pt.ServiceConfig.BaseDir, infos, pt.isService)
+		if err != nil {
+			pt.logger.WithError(err).Error("查找进程失败")
+			return
+		}
+		pt.updateProcesses(ps)
+		wait.Add(len(infos))
+		for _, info := range infos {
+			go pt.gather(wait, sl, info, pt.procs[info.ServiceId])
+		}
 	}
 	wait.Wait()
 }
@@ -271,9 +330,11 @@ func (pt *TZServiceInput) gather(wait *sync.WaitGroup, sl *types.SampleList, ser
 	logger := pt.logger.WithField("service", serviceInfo.ServiceId)
 	pt.gameServiceInfoCache.SetServicePid(serviceInfo.ServiceId, 0)
 
+	tags := serviceInfo.MetricTags()
+
 	if p == nil {
 		logger.Info("进程不存在")
-		sl.PushSample(metricPrefix, "pid", 0, serviceInfo.MetricTags())
+		sl.PushSample(metricPrefix, "pid", 0, tags)
 		return
 	}
 	defer func() {
@@ -283,18 +344,21 @@ func (pt *TZServiceInput) gather(wait *sync.WaitGroup, sl *types.SampleList, ser
 		}
 	}()
 
-	pt.sampleProcess(sl, logger, p, serviceInfo)
+	sl.PushSample(metricPrefix, "pid", float64(p.Pid), tags)
+	tags["pid"] = strconv.Itoa(int(p.Pid))
+
+	pt.sampleProcess(sl, logger, p, serviceInfo, tags)
 	if !pt.ServiceConfig.DisableFileCount {
 		dir := path.Join(pt.ServiceConfig.BaseDir, serviceInfo.ServiceId)
-		pt.sampleFileCount(sl, logger, p, serviceInfo, dir)
+		pt.sampleFileCount(sl, logger, p, dir, tags)
 	}
 	if serviceInfo.WsPort != 0 {
-		pt.sampleWebsocket(sl, logger, metricPrefix, serviceInfo)
+		pt.sampleWebsocket(sl, logger, metricPrefix, serviceInfo, tags)
 	}
 }
 
 // 采集进程信息
-func (pt *TZServiceInput) sampleProcess(sl *types.SampleList, logger *logrus.Entry, proc *process.Process, serviceInfo *GameServiceInfo) {
+func (pt *TZServiceInput) sampleProcess(sl *types.SampleList, logger *logrus.Entry, proc *process.Process, serviceInfo *GameServiceInfo, tags map[string]string) {
 	state := GetProcessState(logger, proc)
 	if state == nil {
 		return
@@ -324,10 +388,10 @@ func (pt *TZServiceInput) sampleProcess(sl *types.SampleList, logger *logrus.Ent
 		"net_io_sent":     sent,
 		"net_io_recv":     recv,
 	}
-	sl.PushSamples(metricPrefix, fields, serviceInfo.MetricTags())
+	sl.PushSamples(metricPrefix, fields, tags)
 }
 
-func (pt *TZServiceInput) sampleFileCount(sl *types.SampleList, logger *logrus.Entry, proc *process.Process, serviceInfo *GameServiceInfo, dir string) {
+func (pt *TZServiceInput) sampleFileCount(sl *types.SampleList, logger *logrus.Entry, proc *process.Process, dir string, tags map[string]string) {
 	fi := filecount.Instance{
 		Directories: []string{dir},
 	}
@@ -336,13 +400,12 @@ func (pt *TZServiceInput) sampleFileCount(sl *types.SampleList, logger *logrus.E
 		logger.WithError(err).Error("读取文件数量失败")
 		return
 	}
-	baseTag := serviceInfo.MetricTags()
-	fi.SetTag(baseTag)
+	fi.SetTag(tags)
 	fi.SetPrefix(metricPrefix)
 	fi.Gather(sl)
 }
 
-func (pt *TZServiceInput) sampleWebsocket(sl *types.SampleList, logger *logrus.Entry, prefix string, serviceInfo *GameServiceInfo) {
+func (pt *TZServiceInput) sampleWebsocket(sl *types.SampleList, logger *logrus.Entry, prefix string, serviceInfo *GameServiceInfo, tags map[string]string) {
 	const metric = "ws_status"
 	reqURL, err := renderTpl(pt.ServiceConfig.WsURL, serviceInfo)
 	if err != nil {
@@ -354,8 +417,7 @@ func (pt *TZServiceInput) sampleWebsocket(sl *types.SampleList, logger *logrus.E
 	if ok {
 		status = 1
 	}
-	baseTag := serviceInfo.MetricTags()
-	sl.PushSample(prefix, metric, status, baseTag)
+	sl.PushSample(prefix, metric, status, tags)
 }
 
 var httpTransport = &http.Transport{

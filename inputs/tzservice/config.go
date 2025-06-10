@@ -3,11 +3,13 @@ package tzservice
 import "flashcat.cloud/categraf/config"
 
 type ServiceConfig struct {
+	Mode             int                             `json:"mode" yaml:"mode" toml:"mode"` // 服务模式，0=连服模式、1=其它服匹配模式
 	BaseDir          string                          `json:"basedir" yaml:"basedir" toml:"basedir"`
 	CacheTTL         int                             `json:"cache_ttl" yaml:"cache_ttl" toml:"cache_ttl"`
 	HttpProvider     *HttpServiceInfoProviderConfig  `json:"http_provider" yaml:"http_provider" toml:"http_provider"`
 	FileProvider     *FileServiceInfoProviderConfig  `json:"file_provider" yaml:"file_provider" toml:"file_provider"`
 	RedisProvider    *RedisServiceInfoProviderConfig `json:"redis_provider" yaml:"redis_provider" toml:"redis_provider"`
+	CmdbProvider     *CmdbServiceInfoProviderConfig  `json:"cmdb_provider" yaml:"cmdb_provider" toml:"cmdb_provider"`
 	ProcessFilter    string                          `json:"process_filter" yaml:"process_filter" toml:"process_filter"`
 	DisableFileCount bool                            `json:"disable_filecount" yaml:"disable_filecount" toml:"disable_filecount"`
 	WsURL            string                          `json:"ws_url" yaml:"ws_url" toml:"ws_url"`
@@ -25,6 +27,13 @@ type RedisServiceInfoProviderConfig struct {
 	Addr     string `json:"addr" yaml:"addr" toml:"addr"`
 	Password string `json:"password" yaml:"password" toml:"password"`
 	DB       int    `json:"db" yaml:"db" toml:"db"`
+}
+
+type CmdbServiceInfoProviderConfig struct {
+	BaseURL   string `json:"base_url" yaml:"base_url" toml:"base_url"`
+	AccessKey string `json:"access_key" yaml:"access_key" toml:"access_key"`
+	SecretKey string `json:"secret_key" yaml:"secret_key" toml:"secret_key"`
+	Model     string `json:"model" yaml:"model" toml:"model"`
 }
 
 // LogConfig 日志配置

@@ -1,7 +1,11 @@
 package tzservice
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,23 +26,23 @@ type GameServiceInfo struct {
 	Name          string `json:"name"`
 	ServiceId     string `json:"service_id"`
 	PrivateIP     string `json:"private_ip"`
-	PortID        int    `json:"port_ip"`
-	CreateTime    string `json:"create_time"`
-	ServiceTypeID int    `json:"service_type_id"`
 	ServiceType   string `json:"service_type"`
-	ClusterID     int    `json:"cluster_id"`
-	ClusterType   string `json:"cluster_type"`
-	ClusterName   string `json:"cluster_name"`
-	GameID        int    `json:"game_id"`
-	GameName      string `json:"game_name"`
-	CheckCmd      string `json:"check_cmd"`
-	StatusApiPort int    `json:"status_api_port"`
-	StatusApiPath string `json:"status_api_path"`
-	FixID         string `json:"fix_id"`
-	WsPort        int    `json:"ws_port"`
-	WssPort       int    `json:"wss_port"`
+	ServiceTypeID int    `json:"service_type_id,omitempty"`
+	PortID        int    `json:"port_ip,omitempty"`
+	CreateTime    string `json:"create_time,omitempty"`
+	ClusterID     int    `json:"cluster_id,omitempty"`
+	ClusterType   string `json:"cluster_type,omitempty"`
+	ClusterName   string `json:"cluster_name,omitempty"`
+	GameID        int    `json:"game_id,omitempty"`
+	GameName      string `json:"game_name,omitempty"`
+	CheckCmd      string `json:"check_cmd,omitempty"`
+	StatusApiPort int    `json:"status_api_port,omitempty"`
+	StatusApiPath string `json:"status_api_path,omitempty"`
+	FixID         string `json:"fix_id,omitempty"`
+	WsPort        int    `json:"ws_port,omitempty"`
+	WssPort       int    `json:"wss_port,omitempty"`
 
-	Extra H `json:"extra"`
+	Extra H `json:"extra,omitempty"`
 }
 
 func (i *GameServiceInfo) MetricTags() S {
@@ -50,14 +54,18 @@ func (i *GameServiceInfo) MetricTags() S {
 		"service_id":   sid,
 		"service_name": i.Name,
 		"service_type": i.ServiceType,
-		"game_id":      strconv.Itoa(i.GameID),
-		"game_name":    i.GameName,
-		"cluster_type": i.ClusterType,
-		"cluster_name": i.ClusterName,
 		"private_ip":   i.PrivateIP,
 	}
 	if i.ClusterID != 0 {
 		tags["cluster_id"] = strconv.Itoa(i.ClusterID)
+	}
+	if i.GameID != 0 {
+		tags["game_id"] = strconv.Itoa(i.GameID)
+		tags["game_name"] = i.GameName
+	}
+	if i.ClusterType != "" {
+		tags["cluster_type"] = i.ClusterType
+		tags["cluster_name"] = i.ClusterName
 	}
 	return tags
 }
@@ -254,4 +262,114 @@ func (p *RedisGameServiceInfoProvider) GetGameServiceInfo(ip string) ([]*GameSer
 		return res, err
 	}
 	return res, nil
+}
+
+type CmdbGameServiceInfoProvider struct {
+	cfg    *CmdbServiceInfoProviderConfig
+	client *http.Client
+}
+
+type CmdbResource struct {
+	ID       int64          `json:"id"`
+	Name     string         `json:"name"`
+	ModelUID string         `json:"model_uid"`
+	Data     map[string]any `json:"data"`
+}
+
+type CmdbResp struct {
+	Code int    `json:"code"`
+	Msg  string `json:"msg"`
+	Data struct {
+		Resources []*CmdbResource `json:"resources"`
+		Total     int64           `json:"total"`
+	} `json:"data"`
+}
+
+func NewCmdbGameServiceInfoProvider(cfg *CmdbServiceInfoProviderConfig) *CmdbGameServiceInfoProvider {
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+	return &CmdbGameServiceInfoProvider{cfg: cfg, client: client}
+}
+
+func (*CmdbGameServiceInfoProvider) sign(secretKey string, urlPath string, ts string) string {
+	h := hmac.New(md5.New, []byte(secretKey))
+	_, _ = h.Write([]byte(ts + urlPath))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func copyExists(dst, src H, keys ...string) {
+	for _, key := range keys {
+		v, ok := src[key]
+		if ok {
+			dst[key] = v
+		}
+	}
+}
+
+func (*CmdbGameServiceInfoProvider) toGameServiceInfo(res *CmdbResource) *GameServiceInfo {
+	info := &GameServiceInfo{
+		Name:        res.Name,
+		ServiceId:   res.Data["service_id"].(string),
+		ServiceType: res.Data["service_type"].(string),
+		PrivateIP:   res.Data["private_ip"].(string),
+		CheckCmd:    res.Data["check_cmd"].(string),
+		Extra:       H{},
+	}
+	copyExists(info.Extra, res.Data, "exe", "cwd")
+	return info
+}
+
+func (p *CmdbGameServiceInfoProvider) getProcesses() ([]*GameServiceInfo, error) {
+	path := "/oapi/resource/find"
+	url := p.cfg.BaseURL + path
+	params := H{
+		"model_uid": p.cfg.Model,
+		"filters": H{
+			"private_ip": GetLocalIP(),
+			"status":     0,
+		},
+	}
+	data, _ := json.Marshal(params)
+	req, err := http.NewRequest("POST", url, bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
+	auth := fmt.Sprintf("Bearer %s/%s/%s", ts, p.cfg.AccessKey, p.sign(p.cfg.SecretKey, path, ts))
+	req.Header.Set("Authorization", auth)
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch hosts: %w", err)
+	}
+	defer resp.Body.Close()
+
+	data, err = io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	response := &CmdbResp{}
+	if err := json.Unmarshal(data, &response); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if response.Code != 0 {
+		return nil, fmt.Errorf("failed to fetch hosts: %s", response.Msg)
+	}
+
+	infos := make([]*GameServiceInfo, 0, len(response.Data.Resources))
+	for _, res := range response.Data.Resources {
+		info := p.toGameServiceInfo(res)
+		infos = append(infos, info)
+	}
+
+	return infos, nil
+}
+
+func (p *CmdbGameServiceInfoProvider) GetGameServiceInfo(ip string) ([]*GameServiceInfo, error) {
+	return p.getProcesses()
 }
