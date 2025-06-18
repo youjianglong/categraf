@@ -65,8 +65,8 @@ func (e *EtcdCLI) KeepAlive(key string, data []byte) (LeaseID, error) {
 		return 0, err
 	}
 	go func() {
-		for v := range ch {
-			logf("keepAlive %d: %d\n", v.ID, v.TTL)
+		for range ch {
+			// logf("keepAlive %d: %d\n", v.ID, v.TTL)
 		}
 	}()
 	return resp.ID, nil

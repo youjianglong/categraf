@@ -51,6 +51,13 @@ func (p *ProcScan) Name() string {
 }
 
 func (p *ProcScan) Init() error {
+	if p.Etcd.KeyPrefix == "" {
+		group := config.Config.Global.Labels["group"]
+		if group != "" {
+			p.Etcd.KeyPrefix = "pm/" + group + "/"
+		}
+	}
+
 	cli, err := NewEtcdCLI(&p.Etcd)
 	if err != nil {
 		return err
