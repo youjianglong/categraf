@@ -2,6 +2,8 @@ package tzservice
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -40,6 +42,13 @@ type TZServiceInput struct {
 	gameServiceInfoCache *GameServiceInfoCache
 	serviceMatcher       *regexp.Regexp
 	procs                map[string]*process.Process
+}
+
+func getProcessHash(p *process.Process) string {
+	m := md5.New()
+	ct, _ := p.CreateTime()
+	m.Write(fmt.Appendf(nil, "%d|%d", p.Pid, ct))
+	return hex.EncodeToString(m.Sum(nil))
 }
 
 func init() {
@@ -279,6 +288,7 @@ func (pt *TZServiceInput) isService(cmd string) bool {
 func (pt *TZServiceInput) Gather(sl *types.SampleList) {
 	infos := pt.gameServiceInfoCache.GetGameServiceInfo()
 	wait := &sync.WaitGroup{}
+	ids := make(map[string]struct{})
 	if pt.ServiceConfig.Mode == 1 {
 		pss, err := pt.findOtherProcesses(infos, pt.isService)
 		if err != nil {
@@ -291,6 +301,8 @@ func (pt *TZServiceInput) Gather(sl *types.SampleList) {
 			wait.Add(size)
 			sl.PushSample(metricPrefix, "num_proc", float64(size), info.MetricTags())
 			for _, p := range ps {
+				id, p := pt.getOrSetProcess(p)
+				ids[id] = struct{}{}
 				go pt.gather(wait, sl, info, p)
 			}
 		}
@@ -300,26 +312,43 @@ func (pt *TZServiceInput) Gather(sl *types.SampleList) {
 			pt.logger.WithError(err).Error("查找进程失败")
 			return
 		}
-		pt.updateProcesses(ps)
 		wait.Add(len(infos))
 		for _, info := range infos {
-			go pt.gather(wait, sl, info, pt.procs[info.ServiceId])
+			id, p := pt.getOrSetProcess(ps[info.ServiceId])
+			if p == nil {
+				sl.PushSample(metricPrefix, "num_proc", 0, info.MetricTags())
+				pt.logger.WithField("service", info.ServiceId).Info("进程不存在")
+				continue
+			}
+			ids[id] = struct{}{}
+			sl.PushSample(metricPrefix, "num_proc", 1, info.MetricTags())
+			go pt.gather(wait, sl, info, p)
 		}
 	}
 	wait.Wait()
+	pt.clearNoExistsProcess(ids)
 }
 
-func (pt *TZServiceInput) updateProcesses(processes map[string]*process.Process) {
-	for ident, proc := range processes {
-		if proc == nil {
-			pt.procs[ident] = nil
-			continue
+func (pt *TZServiceInput) getOrSetProcess(p *process.Process) (string, *process.Process) {
+	id := getProcessHash(p)
+	old, has := pt.procs[id]
+	if has && old != nil {
+		return id, old
+	}
+	pt.procs[id] = p
+	return id, p
+}
+
+// 清除不存在的进程
+func (pt *TZServiceInput) clearNoExistsProcess(exists map[string]struct{}) {
+	var deleted []string
+	for id := range pt.procs {
+		if _, ok := exists[id]; !ok {
+			deleted = append(deleted, id)
 		}
-		old, has := pt.procs[ident]
-		if has && old != nil && old.Pid == proc.Pid {
-			continue
-		}
-		pt.procs[ident] = proc
+	}
+	for _, id := range deleted {
+		delete(pt.procs, id)
 	}
 }
 
@@ -332,11 +361,6 @@ func (pt *TZServiceInput) gather(wait *sync.WaitGroup, sl *types.SampleList, ser
 
 	tags := serviceInfo.MetricTags()
 
-	if p == nil {
-		logger.Info("进程不存在")
-		sl.PushSample(metricPrefix, "pid", 0, tags)
-		return
-	}
 	defer func() {
 		err := recover()
 		if err != nil {
@@ -344,9 +368,7 @@ func (pt *TZServiceInput) gather(wait *sync.WaitGroup, sl *types.SampleList, ser
 		}
 	}()
 
-	sl.PushSample(metricPrefix, "pid", float64(p.Pid), tags)
 	tags["pid"] = strconv.Itoa(int(p.Pid))
-
 	pt.sampleProcess(sl, logger, p, serviceInfo, tags)
 	if !pt.ServiceConfig.DisableFileCount {
 		dir := path.Join(pt.ServiceConfig.BaseDir, serviceInfo.ServiceId)
@@ -378,9 +400,7 @@ func (pt *TZServiceInput) sampleProcess(sl *types.SampleList, logger *logrus.Ent
 		sent += int(io.BytesSent)
 	}
 
-	pid := strconv.Itoa(int(state.Pid))
 	fields := map[string]interface{}{
-		"pid":             pid,
 		"memory_used":     float64(state.MemoryInfo.RSS),
 		"cpu_used":        state.CpuPercent,
 		"elapsed_seconds": state.ElapsedTime,

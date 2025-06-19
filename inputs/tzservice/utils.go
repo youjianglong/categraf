@@ -204,7 +204,7 @@ func GetProcessState(logger *logrus.Entry, p *process.Process) *ProcessState {
 		logger.WithError(err).Error("获取内存信息失败")
 		return nil
 	}
-	cpuPercent, err := p.Percent(time.Duration(0))
+	cpuPercent, err := p.Percent(0)
 	if err != nil {
 		logger.WithError(err).Error("获取cpu使用率失败")
 		return nil
@@ -216,7 +216,7 @@ func GetProcessState(logger *logrus.Entry, p *process.Process) *ProcessState {
 	return &ProcessState{
 		Pid:         p.Pid,
 		MemoryInfo:  memInfo,
-		CpuPercent:  float64(int(cpuPercent*10000)) / 10000,
+		CpuPercent:  cpuPercent,
 		ElapsedTime: float64(time.Now().Unix() - (createTime / 1000)),
 	}
 }

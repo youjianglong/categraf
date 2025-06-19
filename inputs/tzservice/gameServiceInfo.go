@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"flashcat.cloud/categraf/config"
 	"github.com/go-redis/redis/v8"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -286,6 +287,9 @@ type CmdbResp struct {
 }
 
 func NewCmdbGameServiceInfoProvider(cfg *CmdbServiceInfoProviderConfig) *CmdbGameServiceInfoProvider {
+	if cfg.ProjectCode == "" {
+		cfg.ProjectCode = config.Config.Global.Labels["group"]
+	}
 	client := &http.Client{
 		Timeout: 10 * time.Second,
 	}
@@ -323,12 +327,16 @@ func (*CmdbGameServiceInfoProvider) toGameServiceInfo(res *CmdbResource) *GameSe
 func (p *CmdbGameServiceInfoProvider) getProcesses() ([]*GameServiceInfo, error) {
 	path := "/oapi/resource/find"
 	url := p.cfg.BaseURL + path
+	filters := H{
+		"private_ip": GetLocalIP(),
+		"status":     0,
+	}
+	if p.cfg.ProjectCode != "" {
+		filters["project_code"] = p.cfg.ProjectCode
+	}
 	params := H{
 		"model_uid": p.cfg.Model,
-		"filters": H{
-			"private_ip": GetLocalIP(),
-			"status":     0,
-		},
+		"filters":   filters,
 	}
 	data, _ := json.Marshal(params)
 	req, err := http.NewRequest("POST", url, bytes.NewReader(data))

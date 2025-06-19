@@ -30,10 +30,11 @@ type RedisServiceInfoProviderConfig struct {
 }
 
 type CmdbServiceInfoProviderConfig struct {
-	BaseURL   string `json:"base_url" yaml:"base_url" toml:"base_url"`
-	AccessKey string `json:"access_key" yaml:"access_key" toml:"access_key"`
-	SecretKey string `json:"secret_key" yaml:"secret_key" toml:"secret_key"`
-	Model     string `json:"model" yaml:"model" toml:"model"`
+	BaseURL     string `json:"base_url" yaml:"base_url" toml:"base_url"`
+	AccessKey   string `json:"access_key" yaml:"access_key" toml:"access_key"`
+	SecretKey   string `json:"secret_key" yaml:"secret_key" toml:"secret_key"`
+	Model       string `json:"model" yaml:"model" toml:"model"`
+	ProjectCode string `json:"project_code" yaml:"project_code" toml:"project_code"`
 }
 
 // LogConfig 日志配置
