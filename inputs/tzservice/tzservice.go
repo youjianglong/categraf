@@ -247,6 +247,7 @@ func (pt *TZServiceInput) findOtherProcesses(services []*GameServiceInfo, isServ
 		exe, _ := p.Exe()
 		cmd, _ := p.Cmdline()
 		cwd, _ := p.Cwd()
+		exe = strings.TrimSuffix(exe, " (deleted)") // 进程文件不在磁盘上的情况下exe会带有 (deleted) 后缀
 		for _, info := range services {
 			_exe, ok := info.Extra["exe"].(string)
 			if ok && exe != _exe {
@@ -312,7 +313,6 @@ func (pt *TZServiceInput) Gather(sl *types.SampleList) {
 			pt.logger.WithError(err).Error("查找进程失败")
 			return
 		}
-		wait.Add(len(infos))
 		for _, info := range infos {
 			id, p := pt.getOrSetProcess(ps[info.ServiceId])
 			if p == nil {
@@ -320,6 +320,7 @@ func (pt *TZServiceInput) Gather(sl *types.SampleList) {
 				pt.logger.WithField("service", info.ServiceId).Info("进程不存在")
 				continue
 			}
+			wait.Add(1)
 			ids[id] = struct{}{}
 			sl.PushSample(metricPrefix, "num_proc", 1, info.MetricTags())
 			go pt.gather(wait, sl, info, p)
@@ -330,6 +331,9 @@ func (pt *TZServiceInput) Gather(sl *types.SampleList) {
 }
 
 func (pt *TZServiceInput) getOrSetProcess(p *process.Process) (string, *process.Process) {
+	if p == nil {
+		return "", nil
+	}
 	id := getProcessHash(p)
 	old, has := pt.procs[id]
 	if has && old != nil {
