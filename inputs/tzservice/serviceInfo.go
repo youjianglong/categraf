@@ -22,8 +22,8 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// GameServiceInfo 游戏服务信息
-type GameServiceInfo struct {
+// serviceInfo 服务信息
+type serviceInfo struct {
 	Name          string `json:"name"`
 	ServiceId     string `json:"service_id"`
 	PrivateIP     string `json:"private_ip"`
@@ -42,11 +42,10 @@ type GameServiceInfo struct {
 	FixID         string `json:"fix_id,omitempty"`
 	WsPort        int    `json:"ws_port,omitempty"`
 	WssPort       int    `json:"wss_port,omitempty"`
-
-	Extra H `json:"extra,omitempty"`
+	Extra         H      `json:"extra,omitempty"`
 }
 
-func (i *GameServiceInfo) MetricTags() S {
+func (i *serviceInfo) MetricTags() S {
 	sid := i.ServiceId
 	if i.FixID != "" {
 		sid = i.FixID
@@ -71,78 +70,109 @@ func (i *GameServiceInfo) MetricTags() S {
 	return tags
 }
 
-type GameServiceInfoProvider interface {
-	GetGameServiceInfo(ip string) ([]*GameServiceInfo, error)
+type ServiceInfoProvider interface {
+	Name() string                                     // 提供者名称
+	Mode() int8                                       // 匹配模式
+	GetServiceInfo(ip string) ([]*serviceInfo, error) // 获取游戏服务信息
 }
 
-type Zero struct{}
+type Zero = struct{}
 
-type GameServiceInfoCache struct {
-	provider GameServiceInfoProvider
-	ttl      time.Duration
-	syncCh   chan Zero
-	logger   *logrus.Logger
-	infos    []*GameServiceInfo
-	infoLock sync.RWMutex
-	last     time.Time
-	pidMap   map[string]int32
-	pidLock  sync.RWMutex
+type ServiceInfoCache struct {
+	providers   []ServiceInfoProvider
+	ttl         time.Duration
+	syncCh      chan Zero
+	logger      *logrus.Logger
+	services0   []*serviceInfo
+	services1   []*serviceInfo
+	infoLock    sync.RWMutex
+	last        time.Time
+	procNum     map[string]int
+	procNumLock sync.RWMutex
 }
 
-func NewGameServiceInfoCache(provider GameServiceInfoProvider, ttl time.Duration, logger *logrus.Logger) *GameServiceInfoCache {
-	c := &GameServiceInfoCache{
-		provider: provider,
-		ttl:      ttl,
-		syncCh:   make(chan Zero),
-		logger:   logger,
-		pidMap:   make(map[string]int32),
+func NewServiceInfoCache(providers []ServiceInfoProvider, ttl time.Duration, logger *logrus.Logger) *ServiceInfoCache {
+	c := &ServiceInfoCache{
+		providers: providers,
+		ttl:       ttl,
+		syncCh:    make(chan Zero),
+		logger:    logger,
+		procNum:   make(map[string]int),
 	}
 	go c.periodicSync()
 	return c
 }
 
-func (c *GameServiceInfoCache) GetGameServiceInfo() []*GameServiceInfo {
+func (c *ServiceInfoCache) GetServiceInfo0() []*serviceInfo {
 	c.syncCh <- Zero{}
 	c.infoLock.RLock()
 	defer c.infoLock.RUnlock()
-	return c.infos
+	return c.services0
 }
 
-func (c *GameServiceInfoCache) GetAvailGameServiceInfo() []*GameServiceInfo {
-	infos := c.GetGameServiceInfo()
-	c.pidLock.RLock()
-	defer c.pidLock.RUnlock()
-	ret := make([]*GameServiceInfo, 0, len(infos))
-	for _, info := range infos {
-		if c.pidMap[info.ServiceId] > 0 {
+func (c *ServiceInfoCache) GetServiceInfo1() []*serviceInfo {
+	c.syncCh <- Zero{}
+	c.infoLock.RLock()
+	defer c.infoLock.RUnlock()
+	return c.services1
+}
+
+func (c *ServiceInfoCache) GetAvailServiceInfo() []*serviceInfo {
+	infos0 := c.GetServiceInfo0()
+	infos1 := c.GetServiceInfo1()
+	c.procNumLock.RLock()
+	defer c.procNumLock.RUnlock()
+	ret := make([]*serviceInfo, 0, len(infos0)+len(infos1))
+	for _, info := range infos0 {
+		if c.procNum[info.ServiceId] > 0 {
+			ret = append(ret, info)
+		}
+	}
+	for _, info := range infos1 {
+		if c.procNum[info.ServiceId] > 0 {
 			ret = append(ret, info)
 		}
 	}
 	return ret
 }
 
-func (c *GameServiceInfoCache) SetServicePid(serviceId string, pid int32) {
-	c.pidLock.Lock()
-	defer c.pidLock.Unlock()
-	c.pidMap[serviceId] = pid
+func (c *ServiceInfoCache) SetProcNum(procNum map[string]int) {
+	c.procNumLock.Lock()
+	defer c.procNumLock.Unlock()
+	c.procNum = procNum
 }
 
-func (c *GameServiceInfoCache) Sync() {
+func (c *ServiceInfoCache) Sync() {
 	c.infoLock.Lock()
-	defer c.infoLock.Unlock()
-	c.logger.Info("开始同步游戏服务信息")
-	infos, err := c.provider.GetGameServiceInfo(GetLocalIP())
-	if err != nil {
-		c.logger.WithError(err).Error("同步失败")
-		return
+	defer func() {
+		c.infoLock.Unlock()
+		re := recover()
+		if re != nil {
+			c.logger.Errorf("同步服务信息异常: %v", re)
+		}
+	}()
+	c.logger.Debug("开始同步服务信息")
+	var services0, services1 []*serviceInfo
+	for _, provider := range c.providers {
+		logger := c.logger.WithField("provider", provider.Name())
+		logger.Debug("syncing ...")
+		infos, err := provider.GetServiceInfo(GetLocalIP())
+		if err != nil {
+			logger.Error("同步失败: " + err.Error())
+			return
+		}
+		if provider.Mode() == 1 {
+			services1 = append(services1, infos...)
+		} else {
+			services0 = append(services0, infos...)
+		}
 	}
-	b, _ := json.Marshal(infos)
-	c.logger.WithField("json", string(b)).Debug("同步结果")
-	c.infos = infos
+	c.services0 = services0
+	c.services1 = services1
 	c.last = time.Now()
 }
 
-func (c *GameServiceInfoCache) periodicSync() {
+func (c *ServiceInfoCache) periodicSync() {
 	for {
 		if c.last.IsZero() || time.Since(c.last) > c.ttl {
 			c.Sync()
@@ -155,14 +185,22 @@ type HttpGameServiceInfoProvider struct {
 	cfg *HttpServiceInfoProviderConfig
 }
 
-func NewHttpGameServiceInfoProvider(cfg *HttpServiceInfoProviderConfig) GameServiceInfoProvider {
+func NewHttpGameServiceInfoProvider(cfg *HttpServiceInfoProviderConfig) ServiceInfoProvider {
 	p := &HttpGameServiceInfoProvider{
 		cfg: cfg,
 	}
 	return p
 }
 
-func (p *HttpGameServiceInfoProvider) GetGameServiceInfo(ip string) ([]*GameServiceInfo, error) {
+func (p *HttpGameServiceInfoProvider) Name() string {
+	return "http"
+}
+
+func (p *HttpGameServiceInfoProvider) Mode() int8 {
+	return p.cfg.Mode
+}
+
+func (p *HttpGameServiceInfoProvider) GetServiceInfo(ip string) ([]*serviceInfo, error) {
 	now := time.Now()
 	query := url.Values{}
 	ts := now.Format("20060102150405")
@@ -192,7 +230,7 @@ func (p *HttpGameServiceInfoProvider) GetGameServiceInfo(ip string) ([]*GameServ
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("http请求失败 status code(%d): %v", resp.StatusCode, string(data))
 	}
-	var infos []*GameServiceInfo
+	var infos []*serviceInfo
 	err = json.Unmarshal(data, &infos)
 	if err != nil {
 		return nil, errors.WithMessage(err, "json解析失败")
@@ -211,9 +249,17 @@ func NewFileGameServiceInfoProvider(cfg *FileServiceInfoProviderConfig) *FileGam
 	}
 }
 
-func (p *FileGameServiceInfoProvider) GetGameServiceInfo(ip string) ([]*GameServiceInfo, error) {
-	list := make([]*GameServiceInfo, 0)
-	res := make([]*GameServiceInfo, 0)
+func (p *FileGameServiceInfoProvider) Name() string {
+	return "file"
+}
+
+func (p *FileGameServiceInfoProvider) Mode() int8 {
+	return p.cfg.Mode
+}
+
+func (p *FileGameServiceInfoProvider) GetServiceInfo(ip string) ([]*serviceInfo, error) {
+	list := make([]*serviceInfo, 0)
+	res := make([]*serviceInfo, 0)
 	data, err := os.ReadFile(p.cfg.Path)
 	if err != nil {
 		return res, err
@@ -242,6 +288,14 @@ func NewRedisGameServiceInfoProvider(cfg *RedisServiceInfoProviderConfig) *Redis
 	return p
 }
 
+func (p *RedisGameServiceInfoProvider) Name() string {
+	return "redis"
+}
+
+func (p *RedisGameServiceInfoProvider) Mode() int8 {
+	return p.cfg.Mode
+}
+
 func (p *RedisGameServiceInfoProvider) Init() {
 	rdb := redis.NewClient(&redis.Options{
 		Addr:     p.cfg.Addr,
@@ -251,8 +305,8 @@ func (p *RedisGameServiceInfoProvider) Init() {
 	p.rdb = rdb
 }
 
-func (p *RedisGameServiceInfoProvider) GetGameServiceInfo(ip string) ([]*GameServiceInfo, error) {
-	res := make([]*GameServiceInfo, 0)
+func (p *RedisGameServiceInfoProvider) GetServiceInfo(ip string) ([]*serviceInfo, error) {
+	res := make([]*serviceInfo, 0)
 	redisKey := fmt.Sprintf("serviceInfo:%s", ip)
 	data, err := p.rdb.Get(context.Background(), redisKey).Result()
 	if err == redis.Nil {
@@ -296,6 +350,14 @@ func NewCmdbGameServiceInfoProvider(cfg *CmdbServiceInfoProviderConfig) *CmdbGam
 	return &CmdbGameServiceInfoProvider{cfg: cfg, client: client}
 }
 
+func (CmdbGameServiceInfoProvider) Name() string {
+	return "cmdb"
+}
+
+func (p *CmdbGameServiceInfoProvider) Mode() int8 {
+	return 1 // 仅支持模式
+}
+
 func (*CmdbGameServiceInfoProvider) sign(secretKey string, urlPath string, ts string) string {
 	h := hmac.New(md5.New, []byte(secretKey))
 	_, _ = h.Write([]byte(ts + urlPath))
@@ -311,8 +373,8 @@ func copyExists(dst, src H, keys ...string) {
 	}
 }
 
-func (*CmdbGameServiceInfoProvider) toGameServiceInfo(res *CmdbResource) *GameServiceInfo {
-	info := &GameServiceInfo{
+func (*CmdbGameServiceInfoProvider) toGameServiceInfo(res *CmdbResource) *serviceInfo {
+	info := &serviceInfo{
 		Name:        res.Name,
 		ServiceId:   res.Data["service_id"].(string),
 		ServiceType: res.Data["service_type"].(string),
@@ -324,7 +386,7 @@ func (*CmdbGameServiceInfoProvider) toGameServiceInfo(res *CmdbResource) *GameSe
 	return info
 }
 
-func (p *CmdbGameServiceInfoProvider) getProcesses() ([]*GameServiceInfo, error) {
+func (p *CmdbGameServiceInfoProvider) getProcesses() ([]*serviceInfo, error) {
 	path := "/oapi/resource/find"
 	url := p.cfg.BaseURL + path
 	filters := H{
@@ -369,7 +431,7 @@ func (p *CmdbGameServiceInfoProvider) getProcesses() ([]*GameServiceInfo, error)
 		return nil, fmt.Errorf("failed to fetch hosts: %s", response.Msg)
 	}
 
-	infos := make([]*GameServiceInfo, 0, len(response.Data.Resources))
+	infos := make([]*serviceInfo, 0, len(response.Data.Resources))
 	for _, res := range response.Data.Resources {
 		info := p.toGameServiceInfo(res)
 		infos = append(infos, info)
@@ -378,6 +440,6 @@ func (p *CmdbGameServiceInfoProvider) getProcesses() ([]*GameServiceInfo, error)
 	return infos, nil
 }
 
-func (p *CmdbGameServiceInfoProvider) GetGameServiceInfo(ip string) ([]*GameServiceInfo, error) {
+func (p *CmdbGameServiceInfoProvider) GetServiceInfo(ip string) ([]*serviceInfo, error) {
 	return p.getProcesses()
 }

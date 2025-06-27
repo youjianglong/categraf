@@ -1,9 +1,13 @@
 package tzservice
 
-import "flashcat.cloud/categraf/config"
+import (
+	"slices"
+	"strings"
+
+	"flashcat.cloud/categraf/config"
+)
 
 type ServiceConfig struct {
-	Mode             int                             `json:"mode" yaml:"mode" toml:"mode"` // 服务模式，0=连服模式、1=其它服匹配模式
 	BaseDir          string                          `json:"basedir" yaml:"basedir" toml:"basedir"`
 	CacheTTL         int                             `json:"cache_ttl" yaml:"cache_ttl" toml:"cache_ttl"`
 	HttpProvider     *HttpServiceInfoProviderConfig  `json:"http_provider" yaml:"http_provider" toml:"http_provider"`
@@ -18,15 +22,18 @@ type ServiceConfig struct {
 type HttpServiceInfoProviderConfig struct {
 	ApiUrl    string `json:"api_url" yaml:"api_url" toml:"api_url"`
 	SecretKey string `json:"secret_key" yaml:"secret_key" toml:"secret_key"`
+	Mode      int8   `json:"mode" yaml:"mode" toml:"mode"`
 }
 type FileServiceInfoProviderConfig struct {
 	Path string `json:"path" yaml:"path" toml:"path"`
+	Mode int8   `json:"mode" yaml:"mode" toml:"mode"`
 }
 
 type RedisServiceInfoProviderConfig struct {
 	Addr     string `json:"addr" yaml:"addr" toml:"addr"`
 	Password string `json:"password" yaml:"password" toml:"password"`
 	DB       int    `json:"db" yaml:"db" toml:"db"`
+	Mode     int8   `json:"mode" yaml:"mode" toml:"mode"`
 }
 
 type CmdbServiceInfoProviderConfig struct {
@@ -46,16 +53,46 @@ type LogConfig struct {
 	LeaveDays int    `json:"leave_days" yaml:"leave_days" toml:"leave_days"`
 }
 
+type CollectCheckConfig struct {
+	ServiceId    string   `json:"service_id" toml:"service_id" yaml:"service_id"`          // 服务ID（模糊匹配）
+	ServiceName  string   `json:"service_name" toml:"service_name" yaml:"service_name"`    // 服务名称（模糊匹配）
+	ServiceTypes []string `json:"service_types" toml:"service_types" yaml:"service_types"` // 服务类型（包含）
+}
+
+func (c *CollectCheckConfig) Match(info *serviceInfo) bool {
+	if c.ServiceId != "" && !strings.Contains(info.ServiceId, c.ServiceId) {
+		return false
+	}
+	if c.ServiceName != "" && !strings.Contains(info.Name, c.ServiceName) {
+		return false
+	}
+	if len(c.ServiceTypes) > 0 && !slices.Contains(c.ServiceTypes, info.ServiceType) {
+		return false
+	}
+	return true
+}
+
+func (c *CollectCheckConfig) Filter(infos []*serviceInfo) []*serviceInfo {
+	filtered := make([]*serviceInfo, 0, len(infos))
+	for _, info := range infos {
+		if c.Match(info) {
+			filtered = append(filtered, info)
+		}
+	}
+	return filtered
+}
+
 // CollectConfig 采集配置
 type CollectConfig struct {
 	config.InstanceConfig
-	Name     string             `json:"name" toml:"name" yaml:"name"`
-	Iterate  bool               `json:"iterate" toml:"iterate" yaml:"iterate"`
-	Parallel bool               `json:"parallel" toml:"parallel" yaml:"parallel"`
-	Http     *HttpRequestConfig `json:"http" toml:"http" yaml:"http"`
-	Cmd      *CmdRequestConfig  `json:"cmd" toml:"cmd" yaml:"cmd"`
-	Parse    ParseConfig        `json:"parse" toml:"parse" yaml:"parse"`
-	Mappings []MappingConfig    `json:"mapping" toml:"mapping" yaml:"mapping"`
+	Name     string              `json:"name" toml:"name" yaml:"name"`
+	Iterate  bool                `json:"iterate" toml:"iterate" yaml:"iterate"`
+	Parallel bool                `json:"parallel" toml:"parallel" yaml:"parallel"`
+	Http     *HttpRequestConfig  `json:"http" toml:"http" yaml:"http"`
+	Cmd      *CmdRequestConfig   `json:"cmd" toml:"cmd" yaml:"cmd"`
+	Check    *CollectCheckConfig `json:"check" toml:"check" yaml:"check"`
+	Parse    ParseConfig         `json:"parse" toml:"parse" yaml:"parse"`
+	Mappings []MappingConfig     `json:"mapping" toml:"mapping" yaml:"mapping"`
 }
 
 type HttpRequestConfig struct {

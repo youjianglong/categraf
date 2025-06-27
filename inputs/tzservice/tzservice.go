@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -33,15 +32,15 @@ const (
 
 type TZServiceInput struct {
 	config.PluginConfig
-	ServiceConfig ServiceConfig   `json:"service" yaml:"service" toml:"service"`
 	Log           LogConfig       `json:"log" yaml:"log" toml:"log"`
+	ServiceConfig ServiceConfig   `json:"service" yaml:"service" toml:"service"`
 	Collects      []CollectConfig `json:"collect" yaml:"collect" toml:"collect"`
 
-	cleans               []func()
-	logger               *logrus.Logger
-	gameServiceInfoCache *GameServiceInfoCache
-	serviceMatcher       *regexp.Regexp
-	procs                map[string]*process.Process
+	cleans           []func()
+	logger           *logrus.Logger
+	serviceInfoCache *ServiceInfoCache
+	serviceMatcher   *regexp.Regexp
+	procs            map[string]*process.Process
 }
 
 func getProcessHash(p *process.Process) string {
@@ -62,7 +61,7 @@ func (pt *TZServiceInput) Init() error {
 	if pt.ServiceConfig.ProcessFilter != "" {
 		pt.serviceMatcher = regexp.MustCompile(pt.ServiceConfig.ProcessFilter)
 	}
-	pt.initGameServiceInfoCache()
+	pt.initServiceInfoCache()
 	pt.procs = make(map[string]*process.Process)
 	return nil
 }
@@ -118,18 +117,19 @@ func (pt *TZServiceInput) initLogger() {
 	pt.logger = logger
 }
 
-func (pt *TZServiceInput) initGameServiceInfoCache() {
-	var provider GameServiceInfoProvider
+func (pt *TZServiceInput) initServiceInfoCache() {
+	var providers []ServiceInfoProvider
 	if pt.ServiceConfig.HttpProvider != nil {
-		provider = NewHttpGameServiceInfoProvider(pt.ServiceConfig.HttpProvider)
-	} else if pt.ServiceConfig.FileProvider != nil {
-		provider = NewFileGameServiceInfoProvider(pt.ServiceConfig.FileProvider)
-	} else if pt.ServiceConfig.RedisProvider != nil {
-		provider = NewRedisGameServiceInfoProvider(pt.ServiceConfig.RedisProvider)
-	} else if pt.ServiceConfig.CmdbProvider != nil {
-		provider = NewCmdbGameServiceInfoProvider(pt.ServiceConfig.CmdbProvider)
-	} else {
-		panic("游戏服信息接口配置不存在")
+		providers = append(providers, NewHttpGameServiceInfoProvider(pt.ServiceConfig.HttpProvider))
+	}
+	if pt.ServiceConfig.FileProvider != nil {
+		providers = append(providers, NewFileGameServiceInfoProvider(pt.ServiceConfig.FileProvider))
+	}
+	if pt.ServiceConfig.RedisProvider != nil {
+		providers = append(providers, NewRedisGameServiceInfoProvider(pt.ServiceConfig.RedisProvider))
+	}
+	if pt.ServiceConfig.CmdbProvider != nil {
+		providers = append(providers, NewCmdbGameServiceInfoProvider(pt.ServiceConfig.CmdbProvider))
 	}
 
 	var cacheTTL time.Duration
@@ -138,14 +138,10 @@ func (pt *TZServiceInput) initGameServiceInfoCache() {
 	} else {
 		cacheTTL = time.Duration(pt.ServiceConfig.CacheTTL) * time.Second
 	}
-	pt.gameServiceInfoCache = NewGameServiceInfoCache(provider, cacheTTL, pt.logger)
+	pt.serviceInfoCache = NewServiceInfoCache(providers, cacheTTL, pt.logger)
 }
 
 func (pt *TZServiceInput) Drop() {
-	closer, ok := pt.logger.Out.(io.Closer)
-	if ok {
-		_ = closer.Close()
-	}
 	for _, f := range pt.cleans {
 		f()
 	}
@@ -153,10 +149,10 @@ func (pt *TZServiceInput) Drop() {
 
 func (pt *TZServiceInput) Clone() inputs.Input {
 	return &TZServiceInput{
-		cleans:               pt.cleans,
-		logger:               pt.logger,
-		gameServiceInfoCache: pt.gameServiceInfoCache,
-		serviceMatcher:       pt.serviceMatcher,
+		cleans:           pt.cleans,
+		logger:           pt.logger,
+		serviceInfoCache: pt.serviceInfoCache,
+		serviceMatcher:   pt.serviceMatcher,
 	}
 }
 
@@ -176,15 +172,15 @@ func (pt *TZServiceInput) GetInstances() []inputs.Instance {
 			name = fmt.Sprintf("collect_%d", i+1)
 		}
 		ins[i] = &Instance{
-			CollectConfig:        cl,
-			gameServiceInfoCache: pt.gameServiceInfoCache,
-			logger:               pt.logger.WithField("collect", name),
+			CollectConfig:    cl,
+			serviceInfoCache: pt.serviceInfoCache,
+			logger:           pt.logger.WithField("collect", name),
 		}
 	}
 	return ins
 }
 
-func (pt *TZServiceInput) findGameServerProcesses(baseDir string, services []*GameServiceInfo, isService func(string) bool) (map[string]*process.Process, error) {
+func (pt *TZServiceInput) findGameServerProcesses(baseDir string, services []*serviceInfo, isService func(string) bool) (map[string]*process.Process, error) {
 	processes, err := process.Processes()
 	if err != nil {
 		return nil, err
@@ -238,12 +234,12 @@ func (pt *TZServiceInput) findGameServerProcesses(baseDir string, services []*Ga
 	return pm, nil
 }
 
-func (pt *TZServiceInput) findOtherProcesses(services []*GameServiceInfo, isService func(string) bool) (map[string][]*process.Process, error) {
+func (pt *TZServiceInput) findOtherProcesses(services []*serviceInfo, isService func(string) bool) (map[string][]*process.Process, error) {
 	ps, err := process.Processes()
 	if err != nil {
 		return nil, err
 	}
-	find := func(p *process.Process) *GameServiceInfo {
+	find := func(p *process.Process) *serviceInfo {
 		exe, _ := p.Exe()
 		cmd, _ := p.Cmdline()
 		cwd, _ := p.Cwd()
@@ -287,45 +283,52 @@ func (pt *TZServiceInput) isService(cmd string) bool {
 }
 
 func (pt *TZServiceInput) Gather(sl *types.SampleList) {
-	infos := pt.gameServiceInfoCache.GetGameServiceInfo()
+	infos0 := pt.serviceInfoCache.GetServiceInfo0()
+	infos1 := pt.serviceInfoCache.GetServiceInfo1()
 	wait := &sync.WaitGroup{}
 	ids := make(map[string]struct{})
-	if pt.ServiceConfig.Mode == 1 {
-		pss, err := pt.findOtherProcesses(infos, pt.isService)
+	procNum := make(map[string]int)
+	if len(infos0) > 0 {
+		ps, err := pt.findGameServerProcesses(pt.ServiceConfig.BaseDir, infos0, pt.isService)
 		if err != nil {
 			pt.logger.WithError(err).Error("查找进程失败")
 			return
 		}
-		for _, info := range infos {
-			ps := pss[info.ServiceId]
-			size := len(ps)
-			wait.Add(size)
-			sl.PushSample(metricPrefix, "num_proc", float64(size), info.MetricTags())
-			for _, p := range ps {
-				id, p := pt.getOrSetProcess(p)
-				ids[id] = struct{}{}
-				go pt.gather(wait, sl, info, p)
-			}
-		}
-	} else {
-		ps, err := pt.findGameServerProcesses(pt.ServiceConfig.BaseDir, infos, pt.isService)
-		if err != nil {
-			pt.logger.WithError(err).Error("查找进程失败")
-			return
-		}
-		for _, info := range infos {
+		for _, info := range infos0 {
 			id, p := pt.getOrSetProcess(ps[info.ServiceId])
 			if p == nil {
+				procNum[info.ServiceId] = 0
 				sl.PushSample(metricPrefix, "num_proc", 0, info.MetricTags())
 				pt.logger.WithField("service", info.ServiceId).Info("进程不存在")
 				continue
 			}
 			wait.Add(1)
-			ids[id] = struct{}{}
+			ids[id] = Zero{}
+			procNum[info.ServiceId] = 1
 			sl.PushSample(metricPrefix, "num_proc", 1, info.MetricTags())
 			go pt.gather(wait, sl, info, p)
 		}
 	}
+	if len(infos1) > 0 {
+		pss, err := pt.findOtherProcesses(infos1, pt.isService)
+		if err != nil {
+			pt.logger.WithError(err).Error("查找进程失败")
+			return
+		}
+		for _, info := range infos1 {
+			ps := pss[info.ServiceId]
+			size := len(ps)
+			wait.Add(size)
+			procNum[info.ServiceId] = size
+			sl.PushSample(metricPrefix, "num_proc", float64(size), info.MetricTags())
+			for _, p := range ps {
+				id, p := pt.getOrSetProcess(p)
+				ids[id] = Zero{}
+				go pt.gather(wait, sl, info, p)
+			}
+		}
+	}
+	pt.serviceInfoCache.SetProcNum(procNum)
 	wait.Wait()
 	pt.clearNoExistsProcess(ids)
 }
@@ -357,11 +360,10 @@ func (pt *TZServiceInput) clearNoExistsProcess(exists map[string]struct{}) {
 }
 
 // 采集单个服务状态
-func (pt *TZServiceInput) gather(wait *sync.WaitGroup, sl *types.SampleList, serviceInfo *GameServiceInfo, p *process.Process) {
+func (pt *TZServiceInput) gather(wait *sync.WaitGroup, sl *types.SampleList, serviceInfo *serviceInfo, p *process.Process) {
 	defer wait.Done()
 
 	logger := pt.logger.WithField("service", serviceInfo.ServiceId)
-	pt.gameServiceInfoCache.SetServicePid(serviceInfo.ServiceId, 0)
 
 	tags := serviceInfo.MetricTags()
 
@@ -375,8 +377,10 @@ func (pt *TZServiceInput) gather(wait *sync.WaitGroup, sl *types.SampleList, ser
 	tags["pid"] = strconv.Itoa(int(p.Pid))
 	pt.sampleProcess(sl, logger, p, serviceInfo, tags)
 	if !pt.ServiceConfig.DisableFileCount {
-		dir := path.Join(pt.ServiceConfig.BaseDir, serviceInfo.ServiceId)
-		pt.sampleFileCount(sl, logger, p, dir, tags)
+		dir, _ := p.Cwd()
+		if dir != "" && dir != "/" {
+			pt.sampleFileCount(sl, logger, dir, tags)
+		}
 	}
 	if serviceInfo.WsPort != 0 {
 		pt.sampleWebsocket(sl, logger, metricPrefix, serviceInfo, tags)
@@ -384,12 +388,11 @@ func (pt *TZServiceInput) gather(wait *sync.WaitGroup, sl *types.SampleList, ser
 }
 
 // 采集进程信息
-func (pt *TZServiceInput) sampleProcess(sl *types.SampleList, logger *logrus.Entry, proc *process.Process, serviceInfo *GameServiceInfo, tags map[string]string) {
+func (pt *TZServiceInput) sampleProcess(sl *types.SampleList, logger *logrus.Entry, proc *process.Process, serviceInfo *serviceInfo, tags map[string]string) {
 	state := GetProcessState(logger, proc)
 	if state == nil {
 		return
 	}
-	pt.gameServiceInfoCache.SetServicePid(serviceInfo.ServiceId, state.Pid)
 	numFds, err := proc.NumFDs()
 	if err != nil {
 		logger.WithError(err).Error("读取描述符数量失败")
@@ -415,7 +418,7 @@ func (pt *TZServiceInput) sampleProcess(sl *types.SampleList, logger *logrus.Ent
 	sl.PushSamples(metricPrefix, fields, tags)
 }
 
-func (pt *TZServiceInput) sampleFileCount(sl *types.SampleList, logger *logrus.Entry, proc *process.Process, dir string, tags map[string]string) {
+func (pt *TZServiceInput) sampleFileCount(sl *types.SampleList, logger *logrus.Entry, dir string, tags map[string]string) {
 	fi := filecount.Instance{
 		Directories: []string{dir},
 	}
@@ -429,7 +432,7 @@ func (pt *TZServiceInput) sampleFileCount(sl *types.SampleList, logger *logrus.E
 	fi.Gather(sl)
 }
 
-func (pt *TZServiceInput) sampleWebsocket(sl *types.SampleList, logger *logrus.Entry, prefix string, serviceInfo *GameServiceInfo, tags map[string]string) {
+func (pt *TZServiceInput) sampleWebsocket(sl *types.SampleList, logger *logrus.Entry, prefix string, serviceInfo *serviceInfo, tags map[string]string) {
 	const metric = "ws_status"
 	reqURL, err := renderTpl(pt.ServiceConfig.WsURL, serviceInfo)
 	if err != nil {

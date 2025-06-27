@@ -25,8 +25,8 @@ import (
 
 type Instance struct {
 	*CollectConfig
-	gameServiceInfoCache *GameServiceInfoCache
-	logger               *logrus.Entry
+	serviceInfoCache *ServiceInfoCache
+	logger           *logrus.Entry
 }
 
 func (ins *Instance) Init() error {
@@ -51,7 +51,7 @@ func (ins *Instance) createHTTPClient(cfg *HttpRequestConfig) *http.Client {
 	return client
 }
 
-func (ins *Instance) httpRequest(cfg *HttpRequestConfig, target *GameServiceInfo) ([]byte, error) {
+func (ins *Instance) httpRequest(cfg *HttpRequestConfig, target *serviceInfo) ([]byte, error) {
 	reqURL, err := ins.renderTpl(cfg.URL, target)
 	if err != nil {
 		ins.logger.WithError(err).Error("链接模板解析失败")
@@ -84,7 +84,7 @@ func (ins *Instance) httpRequest(cfg *HttpRequestConfig, target *GameServiceInfo
 	return io.ReadAll(resp.Body)
 }
 
-func (ins *Instance) cmdExec(cfg *CmdRequestConfig, target *GameServiceInfo) ([]byte, error) {
+func (ins *Instance) cmdExec(cfg *CmdRequestConfig, target *serviceInfo) ([]byte, error) {
 	cmdStr, err := ins.renderTpl(cfg.Exec, target)
 	if err != nil {
 		ins.logger.WithError(err).Error("命令行模板解析失败")
@@ -142,10 +142,11 @@ func renderTpl(s string, data any) (string, error) {
 }
 
 func (ins *Instance) ParseResult(cfg ParseConfig, data []byte) (result any, err error) {
-	if cfg.Method == "json" {
+	switch cfg.Method {
+	case "json":
 		err = json.Unmarshal(data, &result)
 		return
-	} else if cfg.Method == "regex" {
+	case "regex":
 		p, err := regexp.Compile(cfg.Pattern)
 		if err != nil {
 			return nil, err
@@ -155,7 +156,7 @@ func (ins *Instance) ParseResult(cfg ParseConfig, data []byte) (result any, err 
 	return
 }
 
-func (ins *Instance) gather(sl *types.SampleList, t *GameServiceInfo, query func(info *GameServiceInfo) ([]byte, error)) {
+func (ins *Instance) gather(sl *types.SampleList, t *serviceInfo, query func(info *serviceInfo) ([]byte, error)) {
 	data, err := query(t)
 	if err != nil {
 		ins.logger.WithError(err).Warn("采集失败")
@@ -171,7 +172,7 @@ func (ins *Instance) gather(sl *types.SampleList, t *GameServiceInfo, query func
 	}
 }
 
-func (ins *Instance) pushSample(sl *types.SampleList, info *GameServiceInfo, mapping MappingConfig, result any) {
+func (ins *Instance) pushSample(sl *types.SampleList, info *serviceInfo, mapping MappingConfig, result any) {
 	var value float64
 	var tags map[string]string
 	if info != nil {
@@ -229,15 +230,18 @@ func (ins *Instance) pushSample(sl *types.SampleList, info *GameServiceInfo, map
 
 func (ins *Instance) Gather(sl *types.SampleList) {
 	cfg := ins.CollectConfig
-	var query func(*GameServiceInfo) ([]byte, error)
+	var query func(*serviceInfo) ([]byte, error)
 	if cfg.Http != nil {
-		query = func(si *GameServiceInfo) ([]byte, error) {
+		query = func(si *serviceInfo) ([]byte, error) {
 			return ins.httpRequest(cfg.Http, si)
 		}
 	} else if cfg.Cmd != nil {
-		query = func(si *GameServiceInfo) ([]byte, error) {
+		query = func(si *serviceInfo) ([]byte, error) {
 			return ins.cmdExec(cfg.Cmd, si)
 		}
+	} else {
+		ins.logger.Warn("缺少请求配置")
+		return
 	}
 
 	if !cfg.Iterate {
@@ -245,13 +249,20 @@ func (ins *Instance) Gather(sl *types.SampleList) {
 		return
 	}
 
-	services := ins.gameServiceInfoCache.GetAvailGameServiceInfo()
+	services := ins.serviceInfoCache.GetAvailServiceInfo()
+	if cfg.Check != nil {
+		services = cfg.Check.Filter(services)
+	}
+	if len(services) == 0 {
+		ins.logger.Debug("没有可用的服务")
+		return
+	}
 
 	if cfg.Parallel {
 		wait := new(sync.WaitGroup)
 		wait.Add(len(services))
 		for _, t := range services {
-			go func(info *GameServiceInfo) {
+			go func(info *serviceInfo) {
 				defer wait.Done()
 				ins.gather(sl, info, query)
 			}(t)
