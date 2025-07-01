@@ -54,6 +54,8 @@ type LogConfig struct {
 }
 
 type CollectCheckConfig struct {
+	GameId       int      `json:"game_id" toml:"game_id" yaml:"game_id"`                   // 游戏ID（精确匹配）
+	ClusterId    int      `json:"cluster_id" toml:"cluster_id" yaml:"cluster_id"`          // 集群ID（精确匹配）
 	ServiceId    string   `json:"service_id" toml:"service_id" yaml:"service_id"`          // 服务ID（模糊匹配）
 	ServiceName  string   `json:"service_name" toml:"service_name" yaml:"service_name"`    // 服务名称（模糊匹配）
 	ServiceTypes []string `json:"service_types" toml:"service_types" yaml:"service_types"` // 服务类型（包含）
@@ -67,6 +69,12 @@ func (c *CollectCheckConfig) Match(info *serviceInfo) bool {
 		return false
 	}
 	if len(c.ServiceTypes) > 0 && !slices.Contains(c.ServiceTypes, info.ServiceType) {
+		return false
+	}
+	if c.GameId != 0 && c.GameId != info.GameID {
+		return false
+	}
+	if c.ClusterId != 0 && c.ClusterId != info.ClusterID {
 		return false
 	}
 	return true
