@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -148,7 +149,8 @@ func (c *ServiceInfoCache) Sync() {
 		c.infoLock.Unlock()
 		re := recover()
 		if re != nil {
-			c.logger.Errorf("同步服务信息异常: %v", re)
+			stacks := GetStacks(1)
+			c.logger.Errorf("同步服务信息异常: %v\n  %s", re, strings.Join(stacks, "\n  "))
 		}
 	}()
 	c.logger.Debug("开始同步服务信息")
@@ -373,13 +375,21 @@ func copyExists(dst, src H, keys ...string) {
 	}
 }
 
+func getStr(v H, key string) string {
+	if v == nil {
+		return ""
+	}
+	s, _ := v[key].(string)
+	return s
+}
+
 func (*CmdbGameServiceInfoProvider) toGameServiceInfo(res *CmdbResource) *serviceInfo {
 	info := &serviceInfo{
-		Name:        res.Name,
-		ServiceId:   res.Data["service_id"].(string),
-		ServiceType: res.Data["service_type"].(string),
-		PrivateIP:   res.Data["private_ip"].(string),
-		CheckCmd:    res.Data["check_cmd"].(string),
+		Name:        getStr(res.Data, "service_name"),
+		ServiceId:   res.Name, // name是cmdb资源唯一名称
+		ServiceType: getStr(res.Data, "service_type"),
+		PrivateIP:   getStr(res.Data, "private_ip"),
+		CheckCmd:    getStr(res.Data, "check_cmd"),
 		Extra:       H{},
 	}
 	copyExists(info.Extra, res.Data, "exe", "cwd")

@@ -3,6 +3,7 @@ package tzservice
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"fmt"
 	"log"
 	"net"
 	"reflect"
@@ -221,8 +222,15 @@ func GetProcessState(logger *logrus.Entry, p *process.Process) *ProcessState {
 	}
 }
 
-type ServiceInfo interface {
-	ServiceID() string
-	ServiceTypeID() int
-	Cmd() string
+func GetStacks(skip int) []string {
+	stacks := make([]string, 0)
+	for {
+		skip++
+		_, file, line, ok := runtime.Caller(skip)
+		if !ok {
+			break
+		}
+		stacks = append(stacks, fmt.Sprintf("%s:%d", file, line))
+	}
+	return stacks
 }
