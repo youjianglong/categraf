@@ -1,0 +1,9 @@
+interval = 60
+
+[etcd]
+endpoints = ["etcd-1:2379", "etcd-2:2379"]
+key_prefix = "yunwei"
+
+[scan]
+filter_key_prefix = "proc/"
+put_key_prefix = "filter/"

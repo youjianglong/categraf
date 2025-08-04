@@ -40,7 +40,8 @@ type TZServiceInput struct {
 	logger           *logrus.Logger
 	serviceInfoCache *ServiceInfoCache
 	serviceMatcher   *regexp.Regexp
-	procs            map[string]*process.Process
+	procMu           sync.Mutex
+	procHs           map[string]*process.Process
 }
 
 func getProcessHash(p *process.Process) string {
@@ -62,7 +63,7 @@ func (pt *TZServiceInput) Init() error {
 		pt.serviceMatcher = regexp.MustCompile(pt.ServiceConfig.ProcessFilter)
 	}
 	pt.initServiceInfoCache()
-	pt.procs = make(map[string]*process.Process)
+	pt.procHs = make(map[string]*process.Process)
 	return nil
 }
 
@@ -185,7 +186,7 @@ func (pt *TZServiceInput) findGameServerProcesses(baseDir string, services []*se
 	if err != nil {
 		return nil, err
 	}
-	ps := make(map[string]*process.Process)
+	pss := make(map[string][]*process.Process)
 	for _, p := range processes {
 		status, _ := p.Status()
 		if status == "" || status == "Z" {
@@ -209,26 +210,26 @@ func (pt *TZServiceInput) findGameServerProcesses(baseDir string, services []*se
 			continue
 		}
 		key := filepath.Base(cwd)
-		ps[key] = p
+		pss[key] = append(pss[key], p)
 	}
 	pm := make(map[string]*process.Process)
 	for _, s := range services {
 		id := s.ServiceId
-		pc := ps[id]
-		if pc != nil {
-			cmd, err := pc.Cmdline()
+		ps, ok := pss[id]
+		if !ok {
+			continue
+		}
+		for _, p := range ps {
+			cmd, err := p.Cmdline()
 			if err != nil {
-				pt.logger.WithError(err).Error("获取进程启动命令行失败")
-				pm[id] = nil
+				pt.logger.WithError(err).Debug("获取进程启动命令行失败")
 				continue
 			}
 			// service has been assigned a command string, just check it
 			if s.CheckCmd != "" && !strings.Contains(cmd, s.CheckCmd) {
 				continue
 			}
-			pm[id] = pc
-		} else {
-			pm[id] = nil
+			pm[id] = p
 		}
 	}
 	return pm, nil
@@ -334,28 +335,32 @@ func (pt *TZServiceInput) Gather(sl *types.SampleList) {
 }
 
 func (pt *TZServiceInput) getOrSetProcess(p *process.Process) (string, *process.Process) {
+	pt.procMu.Lock()
+	defer pt.procMu.Unlock()
 	if p == nil {
 		return "", nil
 	}
 	id := getProcessHash(p)
-	old, has := pt.procs[id]
+	old, has := pt.procHs[id]
 	if has && old != nil {
 		return id, old
 	}
-	pt.procs[id] = p
+	pt.procHs[id] = p
 	return id, p
 }
 
 // 清除不存在的进程
 func (pt *TZServiceInput) clearNoExistsProcess(exists map[string]struct{}) {
+	pt.procMu.Lock()
+	defer pt.procMu.Unlock()
 	var deleted []string
-	for id := range pt.procs {
+	for id := range pt.procHs {
 		if _, ok := exists[id]; !ok {
 			deleted = append(deleted, id)
 		}
 	}
 	for _, id := range deleted {
-		delete(pt.procs, id)
+		delete(pt.procHs, id)
 	}
 }
 
