@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -135,7 +136,8 @@ func (pt *TZServiceInput) initServiceInfoCache() {
 
 	var cacheTTL time.Duration
 	if pt.ServiceConfig.CacheTTL == 0 {
-		cacheTTL = 5 * time.Minute
+		rs := rand.New(rand.NewSource(time.Now().UnixNano()))
+		cacheTTL = (time.Duration(rs.Intn(30)) * time.Second) + 2*time.Minute
 	} else {
 		cacheTTL = time.Duration(pt.ServiceConfig.CacheTTL) * time.Second
 	}
